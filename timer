@@ -134,38 +134,51 @@ class App:
         n = len(groups)
         self.group_units = [3600, 60, 1][-n:]
 
-        scale = max(1, min((cols - 4) // (width * 2), (rows - 2) // GLYPH_H, 6))
-        pw, ph = 2 * scale, scale
-        total_w, total_h = width * pw, GLYPH_H * ph
-        if total_w > cols or total_h > rows:
+        # One font pixel is s columns by s half rows, so it looks square.
+        # Grow with the window but keep a calm margin around the digits.
+        s = min(cols * 4 // 5 // width, rows * 2 * 3 // 5 // GLYPH_H)
+        if s < 1:
             text = ":".join(groups)
-            scr.addstr(rows // 2, max(0, (cols - len(text)) // 2), text[: cols - 1], self.attr())
+            if cols > len(text):
+                scr.addstr(rows // 2, (cols - len(text)) // 2, text, self.attr())
             self.regions = []
             scr.refresh()
             return
 
-        x0 = (cols - total_w) // 2
-        y0 = (rows - total_h) // 2
-        attr = self.attr()
+        # Paint font pixels into a grid of half rows.
+        grid = [[False] * (width * s) for _ in range(GLYPH_H * s)]
         spans = {}
-        x = x0
+        x = 0
         for c, gi in items:
             glyph = FONT[c]
             gw = len(glyph[0])
             for r, line in enumerate(glyph):
                 for k, bit in enumerate(line):
-                    if bit != "#":
-                        continue
-                    for dy in range(ph):
-                        yy = y0 + r * ph + dy
-                        xx = x + k * pw
-                        if yy < rows and xx + pw <= cols and not (yy == rows - 1 and xx + pw == cols):
-                            scr.addstr(yy, xx, " " * pw, attr | curses.A_REVERSE)
+                    if bit == "#":
+                        for dy in range(s):
+                            grid[r * s + dy][(x + k) * s:(x + k + 1) * s] = [True] * s
             if gi is not None:
                 a, b = spans.get(gi, (x, x))
-                spans[gi] = (min(a, x), x + gw * pw)
-            x += (gw + 1) * pw
-        self.regions = [(a - pw // 2, b + pw // 2, y0 - ph, y0 + total_h + ph, gi) for gi, (a, b) in spans.items()]
+                spans[gi] = (min(a, x), x + gw)
+            x += gw + 1
+
+        total_w, total_h = width * s, (GLYPH_H * s + 1) // 2
+        x0 = (cols - total_w) // 2
+        y0 = (rows - total_h) // 2
+        attr = self.attr()
+        blank = [False] * total_w
+        for row in range(total_h):
+            top = grid[2 * row]
+            bottom = grid[2 * row + 1] if 2 * row + 1 < len(grid) else blank
+            line = "".join(" \u2584\u2580\u2588"[t * 2 + b] for t, b in zip(top, bottom))
+            try:
+                scr.addstr(y0 + row, x0, line, attr)
+            except curses.error:
+                pass  # writing the last cell of the screen raises
+        self.regions = [
+            (x0 + a * s - s, x0 + b * s + s, y0 - 1, y0 + total_h + 1, gi)
+            for gi, (a, b) in spans.items()
+        ]
         scr.refresh()
 
     def attr(self):
