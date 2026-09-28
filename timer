@@ -1,35 +1,247 @@
 #!/usr/bin/env python3
-"""timer: a minimal terminal countdown with big numbers and mouse control.
+"""timer: a minimal terminal countdown.
 
 usage: timer [DURATION]
 
   DURATION  5, 5m, 90s, 1h30m, 1:30, 1:00:00  (a plain number is minutes)
 
-mouse     click to start or pause, scroll on a number to change it
-keys      space start or pause, up and down change minutes, r reset, q quit
+Type digits to set a time, then press enter. Click the time to edit it,
+scroll on it to change it, and use the buttons with the mouse.
+
+keys  0-9 type a time, enter or space start or pause, backspace delete,
+      r reset, up and down change minutes, esc cancel, q quit
 """
 
 import curses
+import math
 import os
 import re
 import sys
 import time
 
-FONT = {
-    "0": ["###", "#.#", "#.#", "#.#", "###"],
-    "1": ["..#", "..#", "..#", "..#", "..#"],
-    "2": ["###", "..#", "###", "#..", "###"],
-    "3": ["###", "..#", "###", "..#", "###"],
-    "4": ["#.#", "#.#", "###", "..#", "..#"],
-    "5": ["###", "#..", "###", "..#", "###"],
-    "6": ["###", "#..", "###", "#.#", "###"],
-    "7": ["###", "..#", "..#", "..#", "..#"],
-    "8": ["###", "#.#", "###", "#.#", "###"],
-    "9": ["###", "#.#", "###", "..#", "###"],
-    ":": [".", "#", ".", "#", "."],
-}
-GLYPH_H = 5
 MAX_SECONDS = 100 * 3600 - 1
+MAX_TYPED = 6
+
+# Colors. The number is an xterm 256 color, -1 is the terminal default.
+EMPTY, DIGIT, MUTED, TRACK, ACCENT, BUTTON, ICON, CHIP, CHIP_TEXT = range(9)
+XTERM = {DIGIT: -1, MUTED: 241, TRACK: 238, ACCENT: 221, BUTTON: 94,
+         ICON: 230, CHIP: 237, CHIP_TEXT: 250}
+BASIC = {DIGIT: -1, MUTED: 8, TRACK: 8, ACCENT: 3, BUTTON: 3,
+         ICON: 0, CHIP: 8, CHIP_TEXT: 7}
+SURFACES = (BUTTON, CHIP)
+PLAY, PAUSE, RESET = "\u25b6", "\u275a\u275a", "\u21ba"
+PRIORITY = (ACCENT, DIGIT, MUTED, ICON, CHIP_TEXT, TRACK, BUTTON, CHIP)
+
+# One character for each 2 by 4 pixel pattern. Bit 0 is the top left
+# pixel, bit 1 the top right, and so on down the cell.
+OCTANTS = (
+    " \U0001cea8\U0001ceab\U0001fb82\U0001cd00\u2598\U0001cd01\U0001cd02"
+    "\U0001cd03\U0001cd04\u259d\U0001cd05\U0001cd06\U0001cd07\U0001cd08"
+    "\u2580\U0001cd09\U0001cd0a\U0001cd0b\U0001cd0c\U0001fbe6\U0001cd0d"
+    "\U0001cd0e\U0001cd0f\U0001cd10\U0001cd11\U0001cd12\U0001cd13\U0001cd14"
+    "\U0001cd15\U0001cd16\U0001cd17\U0001cd18\U0001cd19\U0001cd1a\U0001cd1b"
+    "\U0001cd1c\U0001cd1d\U0001cd1e\U0001cd1f\U0001fbe7\U0001cd20\U0001cd21"
+    "\U0001cd22\U0001cd23\U0001cd24\U0001cd25\U0001cd26\U0001cd27\U0001cd28"
+    "\U0001cd29\U0001cd2a\U0001cd2b\U0001cd2c\U0001cd2d\U0001cd2e\U0001cd2f"
+    "\U0001cd30\U0001cd31\U0001cd32\U0001cd33\U0001cd34\U0001cd35\U0001fb85"
+    "\U0001cea3\U0001cd36\U0001cd37\U0001cd38\U0001cd39\U0001cd3a\U0001cd3b"
+    "\U0001cd3c\U0001cd3d\U0001cd3e\U0001cd3f\U0001cd40\U0001cd41\U0001cd42"
+    "\U0001cd43\U0001cd44\u2596\U0001cd45\U0001cd46\U0001cd47\U0001cd48"
+    "\u258c\U0001cd49\U0001cd4a\U0001cd4b\U0001cd4c\u259e\U0001cd4d"
+    "\U0001cd4e\U0001cd4f\U0001cd50\u259b\U0001cd51\U0001cd52\U0001cd53"
+    "\U0001cd54\U0001cd55\U0001cd56\U0001cd57\U0001cd58\U0001cd59\U0001cd5a"
+    "\U0001cd5b\U0001cd5c\U0001cd5d\U0001cd5e\U0001cd5f\U0001cd60\U0001cd61"
+    "\U0001cd62\U0001cd63\U0001cd64\U0001cd65\U0001cd66\U0001cd67\U0001cd68"
+    "\U0001cd69\U0001cd6a\U0001cd6b\U0001cd6c\U0001cd6d\U0001cd6e\U0001cd6f"
+    "\U0001cd70\U0001cea0\U0001cd71\U0001cd72\U0001cd73\U0001cd74\U0001cd75"
+    "\U0001cd76\U0001cd77\U0001cd78\U0001cd79\U0001cd7a\U0001cd7b\U0001cd7c"
+    "\U0001cd7d\U0001cd7e\U0001cd7f\U0001cd80\U0001cd81\U0001cd82\U0001cd83"
+    "\U0001cd84\U0001cd85\U0001cd86\U0001cd87\U0001cd88\U0001cd89\U0001cd8a"
+    "\U0001cd8b\U0001cd8c\U0001cd8d\U0001cd8e\U0001cd8f\u2597\U0001cd90"
+    "\U0001cd91\U0001cd92\U0001cd93\u259a\U0001cd94\U0001cd95\U0001cd96"
+    "\U0001cd97\u2590\U0001cd98\U0001cd99\U0001cd9a\U0001cd9b\u259c"
+    "\U0001cd9c\U0001cd9d\U0001cd9e\U0001cd9f\U0001cda0\U0001cda1\U0001cda2"
+    "\U0001cda3\U0001cda4\U0001cda5\U0001cda6\U0001cda7\U0001cda8\U0001cda9"
+    "\U0001cdaa\U0001cdab\u2582\U0001cdac\U0001cdad\U0001cdae\U0001cdaf"
+    "\U0001cdb0\U0001cdb1\U0001cdb2\U0001cdb3\U0001cdb4\U0001cdb5\U0001cdb6"
+    "\U0001cdb7\U0001cdb8\U0001cdb9\U0001cdba\U0001cdbb\U0001cdbc\U0001cdbd"
+    "\U0001cdbe\U0001cdbf\U0001cdc0\U0001cdc1\U0001cdc2\U0001cdc3\U0001cdc4"
+    "\U0001cdc5\U0001cdc6\U0001cdc7\U0001cdc8\U0001cdc9\U0001cdca\U0001cdcb"
+    "\U0001cdcc\U0001cdcd\U0001cdce\U0001cdcf\U0001cdd0\U0001cdd1\U0001cdd2"
+    "\U0001cdd3\U0001cdd4\U0001cdd5\U0001cdd6\U0001cdd7\U0001cdd8\U0001cdd9"
+    "\U0001cdda\u2584\U0001cddb\U0001cddc\U0001cddd\U0001cdde\u2599"
+    "\U0001cddf\U0001cde0\U0001cde1\U0001cde2\u259f\U0001cde3\u2586"
+    "\U0001cde4\U0001cde5\u2588"
+)
+
+
+# Glyphs --------------------------------------------------------------------
+
+def arc(cx, cy, rx, ry, a0, a1, steps=48):
+    """Points on an ellipse. Angles in degrees, y points down."""
+    return [
+        (cx + rx * math.cos(math.radians(a)), cy + ry * math.sin(math.radians(a)))
+        for a in (a0 + (a1 - a0) * i / steps for i in range(steps + 1))
+    ]
+
+
+def _five():
+    bowl = arc(3.1, 6.8, 2.9, 3.2, 222, 520)
+    return [[(5.4, 0), (1.1, 0), bowl[0]] + bowl]
+
+
+def _six():
+    return [arc(3, 6.9, 3, 3.1, 0, 360), arc(6.2, 7, 6.2, 7, 180, 250, 24)]
+
+
+def _nine():
+    return [arc(3, 3.1, 3, 3.1, 0, 360), arc(-0.2, 3, 6.2, 7, 0, 70, 24)]
+
+
+# Each glyph is a list of strokes in a box 6 units wide and 10 units tall.
+GLYPHS = {
+    "0": [arc(3, 5, 3, 5, 0, 360, 64)],
+    "1": [[(1.2, 2.2), (3.6, 0), (3.6, 10)]],
+    "2": [arc(3, 3, 3, 3, 180, 395) + [(0, 10), (6, 10)]],
+    "3": [arc(3, 2.55, 2.6, 2.55, 195, 450), arc(3, 7.45, 3, 2.55, 270, 525)],
+    "4": [[(4.6, 10), (4.6, 0), (0, 7), (6, 7)]],
+    "5": _five(),
+    "6": _six(),
+    "7": [[(0, 0), (6, 0), (2.2, 10)]],
+    "8": [arc(3, 2.45, 2.6, 2.45, 0, 360), arc(3, 7.35, 3, 2.65, 0, 360)],
+    "9": _nine(),
+}
+DIGIT_W, COLON_W, GAP = 6.0, 1.6, 2.4
+COLON_DOTS = (3.6, 8.0)
+
+
+def advance(ch):
+    return COLON_W if ch == ":" else DIGIT_W
+
+
+def text_width(text):
+    return sum(advance(c) for c in text) + GAP * (len(text) - 1)
+
+
+class Canvas:
+    """A pixel grid. Every terminal cell holds 2 by 4 pixels."""
+
+    def __init__(self, cols, rows):
+        self.cols, self.rows = cols, rows
+        self.w, self.h = cols * 2, rows * 4
+        self.px = bytearray(self.w * self.h)
+        self.text = {}  # (row, col) -> (char, fg, bg)
+
+    def put(self, x, y, color):
+        if 0 <= x < self.w and 0 <= y < self.h:
+            self.px[y * self.w + x] = color
+
+    def disc(self, x, y, r, color):
+        for iy in range(int(y - r - 1), int(y + r + 2)):
+            for ix in range(int(x - r - 1), int(x + r + 2)):
+                if (ix + 0.5 - x) ** 2 + (iy + 0.5 - y) ** 2 <= r * r:
+                    self.put(ix, iy, color)
+
+    def capsule(self, x0, y0, x1, y1, color):
+        """Fill a pill shape that covers the pixel box x0..x1, y0..y1."""
+        r = (y1 - y0) / 2
+        cy = y0 + r
+        for iy in range(y0, y1):
+            for ix in range(x0, x1):
+                px = min(max(ix + 0.5, x0 + r), x1 - r)
+                if (ix + 0.5 - px) ** 2 + (iy + 0.5 - cy) ** 2 <= r * r:
+                    self.put(ix, iy, color)
+
+    def fill(self, x0, y0, x1, y1, color):
+        for iy in range(y0, y1):
+            for ix in range(x0, x1):
+                self.put(ix, iy, color)
+
+    def label(self, row, col, text, fg, bg):
+        for i, ch in enumerate(text):
+            self.text[(row, col + i)] = (ch, fg, bg)
+
+    def cells(self):
+        """Yield rows of (char, fg, bg) cells."""
+        w, px = self.w, self.px
+        for row in range(self.rows):
+            out = []
+            for col in range(self.cols):
+                if (row, col) in self.text:
+                    out.append(self.text[(row, col)])
+                    continue
+                base = row * 4 * w + col * 2
+                pix = [px[base + dy * w + dx] for dy in range(4) for dx in range(2)]
+                present = set(pix)
+                present.discard(EMPTY)
+                if not present:
+                    out.append((" ", EMPTY, EMPTY))
+                    continue
+                bg = EMPTY
+                if EMPTY not in pix:
+                    for s in SURFACES:
+                        if s in present:
+                            bg = s
+                            present.discard(s)
+                            break
+                if not present:
+                    out.append((" ", EMPTY, bg))
+                    continue
+                fg = next(c for c in PRIORITY if c in present)
+                mask = sum(1 << i for i, c in enumerate(pix) if c == fg)
+                out.append((OCTANTS[mask], fg, bg))
+            yield out
+
+
+class GlyphCache:
+    def __init__(self):
+        self.cache = {}
+
+    def pixels(self, ch, unit, weight):
+        """Pixel offsets for a glyph drawn with its box at the origin."""
+        key = (ch, unit, weight)
+        if key not in self.cache:
+            self.cache[key] = self._draw(ch, unit, weight)
+        return self.cache[key]
+
+    def _draw(self, ch, unit, weight):
+        pad = int(weight) + 2
+        w = int(advance(ch) * unit) + 2 * pad
+        h = int(10 * unit) + 2 * pad
+        c = Canvas(w // 2 + 1, h // 4 + 1)
+        # Straight lines sit on the pixel grid so every stem has the
+        # same width. Odd widths center on a pixel, even ones on an edge.
+        off = 0.5 if weight % 2 else 0.0
+
+        def snap(v):
+            return round(v - off) + off
+
+        if ch == ":":
+            size = max(2, round(weight * 1.2))
+            x = round(pad + COLON_W * unit / 2 - size / 2)
+            for y in COLON_DOTS:
+                y0 = round(pad + y * unit - size / 2)
+                c.fill(x, y0, x + size, y0 + size, 1)
+        else:
+            for stroke in GLYPHS[ch]:
+                pts = [[pad + x * unit, pad + y * unit] for x, y in stroke]
+                if len(pts) < 6:
+                    for a, b in zip(pts, pts[1:]):
+                        if abs(a[0] - b[0]) < 1e-6:
+                            a[0] = b[0] = snap(a[0])
+                        if abs(a[1] - b[1]) < 1e-6:
+                            a[1] = b[1] = snap(a[1])
+                for (xa, ya), (xb, yb) in zip(pts, pts[1:]):
+                    n = max(1, int(math.hypot(xb - xa, yb - ya) / 0.25))
+                    for i in range(n + 1):
+                        t = i / n
+                        c.disc(xa + (xb - xa) * t, ya + (yb - ya) * t, weight / 2 - 0.01, 1)
+        return [
+            (i % c.w - pad, i // c.w - pad) for i, v in enumerate(c.px) if v
+        ]
+
+
+# Timer state ---------------------------------------------------------------
 
 def parse_duration(text):
     text = text.strip().lower()
@@ -47,215 +259,381 @@ def parse_duration(text):
     raise ValueError(text)
 
 
-def groups_for(seconds, show_hours):
+def typed_seconds(digits):
+    d = digits.rjust(6, "0")
+    return min(MAX_SECONDS, int(d[:2]) * 3600 + int(d[2:4]) * 60 + int(d[4:]))
+
+
+def clock(seconds, hours):
     h, rest = divmod(seconds, 3600)
     m, s = divmod(rest, 60)
-    if show_hours:
-        return [f"{h:02d}", f"{m:02d}", f"{s:02d}"]
-    return [f"{m + h * 60:02d}", f"{s:02d}"]
+    if hours:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
-def layout(groups):
-    """Return a list of (char, group index or None) and width in font pixels."""
-    items = []
-    for i, g in enumerate(groups):
-        if i:
-            items.append((":", None))
-        items.extend((c, i) for c in g)
-    width = sum(len(FONT[c][0]) for c, _ in items) + len(items) - 1
-    return items, width
-
-
-class App:
-    def __init__(self, scr, total):
-        self.scr = scr
-        self.initial = total
+class Timer:
+    def __init__(self, total):
+        self.total = total  # the full length, for the ring
         self.remaining = total
         self.running = False
         self.done = False
         self.end_at = 0.0
-        self.regions = []  # (x0, x1, y0, y1, group index)
-        self.group_units = []
+        self.typed = None  # digits while the user types a time
 
-    def show_hours(self):
-        return max(self.initial, self.remaining) >= 3600
+    def left(self):
+        if not self.running:
+            return self.remaining
+        return max(0, math.ceil(self.end_at - time.monotonic() - 1e-6))
 
     def start(self):
-        if self.remaining <= 0:
-            return
-        self.running = True
-        self.end_at = time.monotonic() + self.remaining
+        if self.remaining > 0:
+            self.done = False
+            self.running = True
+            self.end_at = time.monotonic() + self.remaining
 
     def pause(self):
         self.remaining = self.left()
         self.running = False
 
-    def left(self):
-        if not self.running:
-            return self.remaining
-        return max(0, int(self.end_at - time.monotonic() + 0.999))
-
     def toggle(self):
-        if self.done:
-            self.dismiss()
+        if self.typed is not None:
+            self.commit()
+        elif self.done:
+            self.reset()
+            self.start()
         elif self.running:
             self.pause()
-        else:
+        elif self.remaining:
             self.start()
-
-    def dismiss(self):
-        self.done = False
-        self.running = False
-        self.remaining = self.initial
+        else:
+            self.typed = ""
 
     def reset(self):
         self.done = False
         self.running = False
-        self.remaining = self.initial
+        self.remaining = self.total
 
-    def adjust(self, delta):
+    def set(self, seconds):
+        self.done = False
+        self.running = False
+        self.total = self.remaining = seconds
+
+    def add(self, delta):
+        """Add time, or take it away. Keeps running if it was running."""
         if self.done:
-            self.dismiss()
+            self.set(0)
+            self.done = False
         value = min(MAX_SECONDS, max(0, self.left() + delta))
+        self.total = max(value, min(MAX_SECONDS, self.total + delta))
         if self.running:
             self.end_at += value - self.left()
-            if value == 0:
-                self.running = False
         self.remaining = value
-        if not self.running:
-            self.initial = value
+        if value == 0:
+            self.running = False
 
-    def draw(self):
-        scr = self.scr
-        scr.erase()
-        rows, cols = scr.getmaxyx()
-        groups = groups_for(self.left(), self.show_hours())
-        items, width = layout(groups)
-        n = len(groups)
-        self.group_units = [3600, 60, 1][-n:]
+    def type_digit(self, ch):
+        if self.typed is None:
+            self.typed = ""
+        if len(self.typed) < MAX_TYPED and (self.typed or ch != "0"):
+            self.typed += ch
 
-        # One font pixel is s columns by s half rows, so it looks square.
-        # Grow with the window but keep a calm margin around the digits.
-        s = min(cols * 4 // 5 // width, rows * 2 * 3 // 5 // GLYPH_H)
-        if s < 1:
-            text = ":".join(groups)
-            if cols > len(text):
-                scr.addstr(rows // 2, (cols - len(text)) // 2, text, self.attr())
-            self.regions = []
-            scr.refresh()
-            return
+    def commit(self):
+        seconds = typed_seconds(self.typed or "0")
+        self.typed = None
+        if seconds:
+            self.set(seconds)
+            self.start()
 
-        # Paint font pixels into a grid of half rows.
-        grid = [[False] * (width * s) for _ in range(GLYPH_H * s)]
-        spans = {}
-        x = 0
-        for c, gi in items:
-            glyph = FONT[c]
-            gw = len(glyph[0])
-            for r, line in enumerate(glyph):
-                for k, bit in enumerate(line):
-                    if bit == "#":
-                        for dy in range(s):
-                            grid[r * s + dy][(x + k) * s:(x + k + 1) * s] = [True] * s
-            if gi is not None:
-                a, b = spans.get(gi, (x, x))
-                spans[gi] = (min(a, x), x + gw)
-            x += gw + 1
+    def tick(self):
+        if self.running and self.left() == 0:
+            self.running = False
+            self.remaining = 0
+            self.done = True
 
-        total_w, total_h = width * s, (GLYPH_H * s + 1) // 2
-        x0 = (cols - total_w) // 2
-        y0 = (rows - total_h) // 2
-        attr = self.attr()
-        blank = [False] * total_w
-        for row in range(total_h):
-            top = grid[2 * row]
-            bottom = grid[2 * row + 1] if 2 * row + 1 < len(grid) else blank
-            line = "".join(" \u2584\u2580\u2588"[t * 2 + b] for t, b in zip(top, bottom))
-            try:
-                scr.addstr(y0 + row, x0, line, attr)
-            except curses.error:
-                pass  # writing the last cell of the screen raises
-        self.regions = [
-            (x0 + a * s - s, x0 + b * s + s, y0 - 1, y0 + total_h + 1, gi)
-            for gi, (a, b) in spans.items()
-        ]
-        scr.refresh()
-
-    def attr(self):
+    def progress(self):
+        """Part of the total that has passed, from 0 to 1."""
         if self.done:
-            return curses.color_pair(1) if curses.has_colors() else curses.A_BOLD
+            return 1.0
+        if not self.total:
+            return 0.0
         if self.running:
-            return curses.A_NORMAL
-        return curses.A_DIM
+            left = max(0.0, self.end_at - time.monotonic())
+        else:
+            left = self.remaining
+        return min(1.0, max(0.0, 1 - left / self.total))
 
-    def group_at(self, mx, my):
-        for a, b, top, bottom, gi in self.regions:
-            if a <= mx < b and top <= my < bottom:
-                return gi
+
+# Drawing -------------------------------------------------------------------
+
+class View:
+    def __init__(self):
+        self.glyphs = GlyphCache()
+        self.ring_cache = {}
+        self.regions = []  # (col0, row0, col1, row1, action)
+
+    def ring(self, d, weight):
+        """Pixels of a circle d pixels wide, with the angle from the top."""
+        key = (d, weight)
+        if key not in self.ring_cache:
+            r = d / 2 - weight / 2
+            c = d / 2
+            pts = []
+            for iy in range(d):
+                for ix in range(d):
+                    dx, dy = ix + 0.5 - c, iy + 0.5 - c
+                    if abs(math.hypot(dx, dy) - r) <= weight / 2:
+                        # Counterclockwise from twelve o'clock, 0 to 1.
+                        a = math.atan2(-dy, dx) - math.pi / 2
+                        pts.append((ix, iy, (a / (2 * math.pi)) % 1.0))
+            self.ring_cache[key] = pts
+        return self.ring_cache[key]
+
+    def text(self, cv, chars, x0, y_top, unit, weight):
+        """Draw (char, color) pairs. Return the pixel box of each char."""
+        boxes = []
+        x = x0
+        for ch, color in chars:
+            ox, oy = round(x), round(y_top)
+            for dx, dy in self.glyphs.pixels(ch, unit, weight):
+                cv.put(ox + dx, oy + dy, color)
+            boxes.append((ox, ox + round(advance(ch) * unit)))
+            x += (advance(ch) + GAP) * unit
+        return boxes
+
+    def display(self, t):
+        """The characters to show, with colors, and the width template."""
+        if t.typed is not None:
+            n = 6 if len(t.typed) > 4 else 4
+            digits = t.typed.rjust(n, "0")
+            first = n - len(t.typed)
+            chars = []
+            for i, d in enumerate(digits):
+                if i and i % 2 == 0:
+                    chars.append((":", DIGIT if first < i else MUTED))
+                chars.append((d, DIGIT if i >= first else MUTED))
+            template = "00:00:00" if n == 6 else "00:00"
+            return chars, template, False
+        hours = max(t.total, t.left()) >= 3600
+        color = ACCENT if t.done else DIGIT
+        chars = [(c, color) for c in clock(t.left(), hours)]
+        return chars, ("0:00:00" if hours else "00:00"), True
+
+    def draw(self, t, cols, rows):
+        cv = Canvas(cols, rows)
+        self.regions = []
+        chars, template, groups = self.display(t)
+        full = rows >= 16 and cols >= 32
+
+        if full:
+            btn_rows = 3
+            gap = max(1, rows // 16)
+            margin = max(1, rows // 12)
+            ring_rows = rows - 2 * margin - gap - btn_rows
+            d = min(ring_rows * 4, (cols - 4) * 2)
+            d -= d % 4
+            block = math.ceil(d / 4) + gap + btn_rows
+            top = (rows - block) // 2 * 4
+            left = cols - d // 2
+            cy = top + d / 2
+
+            weight = max(2, round(d * 0.022))
+            p = t.progress()
+            for ix, iy, a in self.ring(d, weight):
+                cv.put(left + ix, top + iy, ACCENT if a < p else TRACK)
+
+            unit = min(d * 0.68 / text_width(template), d * 0.22 / 10)
+            text_top = cy - d * 0.04 - 5 * unit
+        else:
+            unit = min(cols * 2 * 0.8 / text_width(template), rows * 4 * 0.6 / 10)
+            text_top = rows * 2 - 5 * unit
+
+        unit = round(unit * 4) / 4
+        if unit < 1:
+            self.draw_plain(cv, t, chars)
+            return cv
+
+        weight = max(1, round(unit * 0.8))
+        width = text_width("".join(c for c, _ in chars)) * unit
+        x0 = cols - width / 2
+        boxes = self.text(cv, chars, x0, text_top, unit, weight)
+        text_bottom = text_top + 10 * unit
+
+        # Scroll targets: hours, minutes and seconds.
+        row0 = int(text_top // 4) - 1
+        row1 = int(text_bottom // 4) + 2
+        if groups:
+            spans = []
+            digits = [b for (c, _), b in zip(chars, boxes) if c != ":"]
+            for i in range(len(digits) - 1, -1, -2):
+                a = digits[max(0, i - 1)][0]
+                spans.insert(0, (a, digits[i][1]))
+            units = [1, 60, 3600][: len(spans)][::-1]
+            for (a, b), u in zip(spans, units):
+                self.regions.append((a // 2, row0, b // 2 + 1, row1, ("time", u)))
+        # The whole time, colons included, for clicks.
+        self.regions.append((int(x0 // 2) - 1, row0, int((x0 + width) // 2) + 2, row1, ("time", 60)))
+
+        if not full:
+            return cv
+
+        # Underline, the cue that the time can be typed.
+        ux0, ux1 = round(cols - d * 0.3), round(cols + d * 0.3)
+        uy = round(text_bottom + max(4, d * 0.07))
+        cv.fill(ux0, uy, ux1, uy + 1, ACCENT if t.typed is not None else TRACK)
+
+        # Chips that add time.
+        chip_row = (uy + max(4, d * 0.06)) // 4 + 1
+        chip_row = int(chip_row)
+        if d >= 72 and chip_row * 4 < top + d * 0.8:
+            chips = [("+0:30", 30), ("+1:00", 60)]
+            widths = [len(c) + 4 for c, _ in chips]
+            col = cols // 2 - (sum(widths) + 2) // 2
+            for (label, secs), w in zip(chips, widths):
+                cv.capsule(col * 2, chip_row * 4, (col + w) * 2, chip_row * 4 + 4, CHIP)
+                cv.label(chip_row, col + 2, label, CHIP_TEXT, CHIP)
+                self.regions.append((col, chip_row, col + w, chip_row + 1, ("add", secs)))
+                col += w + 2
+
+        # Play and reset.
+        brow = (top + d) // 4 + gap
+        bw = d // 2 // 2 - 1  # columns per button
+        lcol = cols // 2 - 1 - bw
+        rcol = cols // 2 + 1
+        y0, y1 = brow * 4, (brow + btn_rows) * 4
+        for col, action in ((lcol, "toggle"), (rcol, "reset")):
+            cv.capsule(col * 2, y0, (col + bw) * 2, y1, BUTTON)
+            self.regions.append((col, brow, col + bw, brow + btn_rows, (action, 0)))
+        playing = t.running and t.typed is None
+        mid = brow + btn_rows // 2
+        cv.label(mid, lcol + bw // 2, PAUSE if playing else PLAY, ICON, BUTTON)
+        cv.label(mid, rcol + bw // 2, RESET, ICON, BUTTON)
+        return cv
+
+    def draw_plain(self, cv, t, chars):
+        text = "".join(c for c, _ in chars)
+        row, col = cv.rows // 2, max(0, (cv.cols - len(text)) // 2)
+        for i, (c, color) in enumerate(chars[: cv.cols]):
+            cv.label(row, col + i, c, color, EMPTY)
+        self.regions.append((col, row, col + len(text), row + 1, ("time", 60)))
+
+    def hit(self, col, row):
+        for c0, r0, c1, r1, action in self.regions:
+            if c0 <= col < c1 and r0 <= row < r1:
+                return action
         return None
 
-    def handle_mouse(self):
-        try:
-            _, mx, my, _, bstate = curses.getmouse()
-        except curses.error:
-            return
-        up = getattr(curses, "BUTTON4_PRESSED", 0)
-        down = getattr(curses, "BUTTON5_PRESSED", 0x200000)
-        if bstate & (up | down):
-            gi = self.group_at(mx, my)
-            unit = self.group_units[gi] if gi is not None else 60
-            self.adjust(unit if bstate & up else -unit)
-        elif bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
-            self.toggle()
-        elif bstate & (curses.BUTTON3_PRESSED | curses.BUTTON3_CLICKED):
-            self.reset()
 
-    def run(self):
-        while True:
-            if self.running and self.left() == 0:
-                self.running = False
-                self.remaining = 0
-                self.done = True
-            self.draw()
+# Terminal ------------------------------------------------------------------
 
-            if self.running:
-                wait = (self.end_at - time.monotonic()) % 1.0 or 1.0
-            else:
-                wait = None
-            self.scr.timeout(-1 if wait is None else max(1, int(wait * 1000) + 5))
+class Screen:
+    def __init__(self, scr):
+        self.scr = scr
+        self.pairs = {}
+        self.palette = XTERM if curses.COLORS >= 256 else BASIC
 
-            key = self.scr.getch()
-            if key == -1:
-                continue
-            if key == curses.KEY_MOUSE:
-                self.handle_mouse()
-            elif key in (ord("q"), ord("Q"), 27):
-                return
-            elif key in (ord(" "), ord("\n"), curses.KEY_ENTER):
-                self.toggle()
-            elif key in (ord("r"), ord("R")):
-                self.reset()
-            elif key in (curses.KEY_UP, ord("+"), ord("="), ord("k")):
-                self.adjust(60)
-            elif key in (curses.KEY_DOWN, ord("-"), ord("_"), ord("j")):
-                self.adjust(-60)
-            elif key == curses.KEY_RESIZE:
-                pass
-            elif self.done:
-                self.dismiss()
+    def attr(self, fg, bg):
+        key = (fg, bg)
+        if key not in self.pairs:
+            n = len(self.pairs) + 1
+            curses.init_pair(n, self.palette.get(fg, -1), self.palette.get(bg, -1))
+            self.pairs[key] = curses.color_pair(n)
+        return self.pairs[key]
+
+    def paint(self, cv):
+        scr = self.scr
+        scr.erase()
+        for row, cells in enumerate(cv.cells()):
+            col = 0
+            while col < len(cells):
+                _, fg, bg = cells[col]
+                end = col
+                while end < len(cells) and cells[end][1:] == (fg, bg):
+                    end += 1
+                run = "".join(c for c, _, _ in cells[col:end])
+                if run.strip() or bg != EMPTY:
+                    try:
+                        scr.addstr(row, col, run, self.attr(fg, bg))
+                    except curses.error:
+                        pass  # the last cell of the screen raises
+                col = end
+        scr.refresh()
 
 
-def main(scr, total):
+def run(scr, t):
     curses.curs_set(0)
     curses.use_default_colors()
-    if curses.has_colors():
-        curses.init_pair(1, curses.COLOR_RED, -1)
-    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+    curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
-    app = App(scr, total)
-    if total:
-        app.start()
-    app.run()
+    screen = Screen(scr)
+    view = View()
+    scroll_up = getattr(curses, "BUTTON4_PRESSED", 0)
+    scroll_down = getattr(curses, "BUTTON5_PRESSED", 0x200000)
+
+    while True:
+        t.tick()
+        rows, cols = scr.getmaxyx()
+        screen.paint(view.draw(t, cols, rows))
+
+        if t.running:
+            wait = (t.end_at - time.monotonic()) % 1.0 or 1.0
+            scr.timeout(max(1, int(wait * 1000) + 5))
+        else:
+            scr.timeout(-1)
+
+        key = scr.getch()
+        if key == -1 or key == curses.KEY_RESIZE:
+            continue
+        if key == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, b = curses.getmouse()
+            except curses.error:
+                continue
+            action = view.hit(mx, my)
+            if b & (scroll_up | scroll_down):
+                unit = action[1] if action and action[0] == "time" else 60
+                t.typed = None
+                t.add(unit if b & scroll_up else -unit)
+            elif b & curses.BUTTON1_PRESSED and action:
+                kind, value = action
+                if kind == "toggle":
+                    t.toggle()
+                elif kind == "reset":
+                    t.typed = None
+                    t.reset()
+                elif kind == "add":
+                    t.typed = None
+                    t.add(value)
+                    if not t.running:
+                        t.start()
+                elif kind == "time":
+                    t.typed = "" if t.typed is None else None
+            continue
+
+        ch = chr(key) if 0 <= key < 256 else ""
+        if ch.isdigit():
+            t.type_digit(ch)
+        elif key in (curses.KEY_BACKSPACE, 127, 8) and t.typed is not None:
+            t.typed = t.typed[:-1]
+        elif ch in ("\n", "\r", " ") or key == curses.KEY_ENTER:
+            t.toggle()
+        elif key == 27:
+            if t.typed is None:
+                return
+            t.typed = None
+        elif ch in ("q", "Q"):
+            return
+        elif t.done:
+            t.reset()
+        elif ch in ("r", "R"):
+            t.typed = None
+            t.reset()
+        elif key in (curses.KEY_UP, ord("+"), ord("="), ord("k")):
+            t.typed = None
+            t.add(60)
+        elif key in (curses.KEY_DOWN, ord("-"), ord("_"), ord("j")):
+            t.typed = None
+            t.add(-60)
 
 
 def cli():
@@ -266,13 +644,18 @@ def cli():
     total = 0
     if args:
         try:
-            total = parse_duration("".join(args))
+            total = min(MAX_SECONDS, parse_duration("".join(args)))
         except ValueError:
             print(f"timer: cannot read duration '{' '.join(args)}'", file=sys.stderr)
             return 2
+    t = Timer(total)
+    if total:
+        t.start()
+    else:
+        t.typed = ""
     os.environ.setdefault("ESCDELAY", "25")
     try:
-        curses.wrapper(main, min(total, MAX_SECONDS))
+        curses.wrapper(run, t)
     except KeyboardInterrupt:
         pass
     return 0
